@@ -923,7 +923,7 @@ After confirmation:
 | `StandardNamingGeneratorAgent` | Yes | receives surrogate-enriched logical entities |
 | `SttmGeneratorAgent` | Yes | receives surrogate-aware entity structure and primary-key metadata |
 | `STTMtoDDLAgent` | Yes | uses surrogate-aware primary-key metadata for physical PK generation |
-| `RelationshipIdentifierLogicalAgent` | No direct rerun impact | remains an upstream dependency used during surrogate planning |
+| `RelationshipIdentifierLogicalAgent` | Used as upstream input | existing parent-child relationships are read for surrogate planning, but the surrogate-key step does not re-run or rewrite the relationship model itself |
 
 ## 10.1 Standard Naming
 
