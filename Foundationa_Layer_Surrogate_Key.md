@@ -1,97 +1,72 @@
 # Foundation Layer Surrogate Key Technical Architecture
 
-## 1. Purpose
-This document explains the surrogate-key step implemented in the Foundation Layer physical-modeling flow inside `ADM_SILVER_LAYER`.
+> **Platform Scope**
+> Foundation Layer -> Stage 4 Physical Modeling -> `Generate Surrogate Keys`
 
-The goal of this feature is to let the platform assess, plan, confirm, and persist surrogate-key decisions before downstream physical-modeling steps such as Standard Naming, STTM generation, and DDL/DML generation.
+> **Execution Style**
+> Deterministic rules engine wrapped in an agentic orchestration shell
 
-This document is intentionally detailed so a developer, architect, or delivery team can understand:
-
-- why the feature exists
-- where it lives
-- what repos and files participate
-- how UI, API, Azure Functions, metastore persistence, and agent execution work together
-- how confirmed decisions are propagated downstream
+> **Repos Involved**
+> `apps-azure` + `apis-azure` + `adm-foundation-layer-agents-azure`
 
 ---
 
-## 2. Business Requirement Summary
-The implemented feature is designed around these core rules:
+## Executive View
 
-- `Generate Surrogate Keys` is the first sub-step in Foundation Layer Stage 4 Physical Modeling.
-- Users can assess whether surrogate keys are needed before generating a detailed plan.
-- SCD Type 2 entities must receive surrogate keys and cannot be skipped.
-- Non-SCD2 entities remain optional and can be selected by the user.
-- Surrogate key datatype is configurable as `INT` or `BIGINT`, defaulting to `INT`.
-- Business keys remain present in the entity even when a surrogate key is introduced.
-- Confirmed surrogate keys must flow into Standard Naming, STTM, and DDL/DML.
+The surrogate-key step is the first sub-step of Foundation Layer Stage 4. It is intentionally placed before Standard Naming, STTM, and DDL/DML generation because it changes the physical structure of the model and therefore must become part of the authoritative physical-design state before downstream artifacts are generated.
 
----
+This implementation is not just another backend agent call. It is a structured HITL workflow that:
 
-## 3. Repo Layout And Ownership
-The surrogate-key feature spans three repos in this workspace.
-
-### 3.1 `apps-azure`
-Frontend Foundation Layer UI.
-
-Primary files:
-
-- `apps-azure/frontend/components/stages/Foundation_Layer/Stage4_PhysicalModeling.tsx`
-- `apps-azure/frontend/components/stages/Foundation_Layer/stage4/GenerateSurrogateKeysView.tsx`
-
-Responsibilities:
-
-- render the Stage 4 surrogate-key step
-- call the backend assessment and planning APIs
-- stream progress logs through Web PubSub
-- enforce the HITL flow
-- collect user choices
-- confirm the plan
-- use confirmed surrogate-enriched entities as the source for the next Stage 4 sub-steps
-
-### 3.2 `apis-azure`
-Backend orchestration and metastore persistence layer.
-
-Primary files:
-
-- `apis-azure/backend/api/routes/agents.py`
-- `apis-azure/backend/api/routes/surrogate_key_helpers.py`
-- `apis-azure/backend/api/routes/dependency_agents.py`
-
-Responsibilities:
-
-- identify dependency sessions required by the surrogate-key agent
-- consolidate upstream outputs into a normalized agent input payload
-- write `input_json` into the metastore
-- trigger the Azure Function activity
-- negotiate Web PubSub access for frontend streaming
-- confirm and persist user selections
-- restructure output for UI consumption
-- expose confirmed surrogate-key state to downstream agents
-
-### 3.3 `adm-foundation-layer-agents-azure`
-Azure Functions and Python agent execution layer.
-
-Primary files:
-
-- `adm-foundation-layer-agents-azure/function_app.py`
-- `adm-foundation-layer-agents-azure/agents/SurrogateKeyGenerator/SurrogateKeyGeneratorAgent.py`
-- `adm-foundation-layer-agents-azure/agents/SurrogateKeyGenerator/master/agent.py`
-
-Responsibilities:
-
-- receive the execution request from the backend API
-- load normalized agent input from the metastore
-- run the deterministic surrogate-key workflow using LangGraph
-- persist the output back to the metastore
-- publish execution lifecycle updates to Web PubSub
+- assesses whether surrogate keys are required
+- uses confirmed SCD behavior, not stale recommendation state
+- distinguishes mandatory vs optional surrogate-key behavior
+- lets the user review and confirm table-level decisions
+- persists the confirmed physical-design intent back into session state
+- turns the confirmed result into the downstream source of truth
 
 ---
 
-## 4. Why This Step Lives In Stage 4
-The surrogate-key step is intentionally placed as the first sub-step of Foundation Stage 4 Physical Modeling.
+## 1. Design Goals
 
-Current Stage 4 order:
+### 1.1 Business Goals
+
+- enforce surrogate keys for SCD Type 2 entities
+- keep surrogate keys optional for non-SCD2 entities
+- preserve business keys alongside surrogate keys
+- make datatype selectable as `INT` or `BIGINT`, default `INT`
+- ensure surrogate decisions flow into Standard Naming, STTM, and DDL/DML
+
+### 1.2 Engineering Goals
+
+- deterministic outputs for repeatability
+- HITL control without fragile client-side-only state
+- minimal API surface area
+- compatibility with existing metastore/session patterns
+- reuse of existing ADM orchestration patterns
+
+### 1.3 Why This Agent Is Stronger Than Most Other Agents In This Workflow
+
+Compared with many other Foundation Layer agents, this surrogate-key agent has several advantages:
+
+- it is **deterministic**, not LLM-dependent for the final business rule
+- it is **stateful**, but still easy to reason about
+- it supports **assessment-first HITL**, not just generate-and-show
+- it merges **confirmed SCD state** instead of trusting only the original recommendation payload
+- it affects **multiple downstream contracts** in a controlled way
+- it persists both **draft planning context** and **confirmed structural decisions**
+
+This makes it one of the most operationally reliable Stage 4 agents because:
+
+- the business rules are explicit
+- the review path is explicit
+- the metastore state transition is explicit
+- downstream propagation is explicit
+
+---
+
+## 2. Stage Placement
+
+### 2.1 Current Stage 4 Order
 
 1. Generate Surrogate Keys
 2. Standardize Names
@@ -100,535 +75,1009 @@ Current Stage 4 order:
 5. Generate DDL & DML
 6. Download Artifacts
 
-Reason:
+### 2.2 Why It Must Be First
 
-- surrogate keys change the physical-table structure
-- surrogate keys affect physical primary-key behavior
-- surrogate keys may add new foreign-key columns to related child entities
-- the naming step must run after surrogate-key attributes exist
-- STTM and DDL generation must use the confirmed surrogate-aware entity model
+Surrogate-key generation must run first because it can:
 
-If this step ran later, downstream outputs would be inconsistent.
+- add new physical primary-key columns
+- change the effective physical primary key of a table
+- preserve business keys as non-primary business columns
+- add propagated surrogate foreign keys into child entities
 
----
-
-## 5. Technology Choices
-
-### 5.1 Frontend Stack
-Used in `apps-azure`:
-
-- React
-- TypeScript
-- Vite
-- existing Stage 4 component pattern
-- browser `fetch`
-- WebSocket client for Azure Web PubSub
-
-Why:
-
-- fits the current Foundation Layer UI architecture
-- allows clear HITL interaction
-- easy state management for assessment, plan, confirmation, and downstream propagation
-
-### 5.2 Backend/API Stack
-Used in `apis-azure`:
-
-- FastAPI route handlers
-- SQLAlchemy DB access
-- existing metastore helper methods
-- existing output restructuring path
-
-Why:
-
-- the rest of the ADM workflow already uses these conventions
-- surrogate-key orchestration needed to behave like the other agents
-- session persistence and downstream dependency handling were already centralized here
-
-### 5.3 Agent/Execution Stack
-Used in `adm-foundation-layer-agents-azure`:
-
-- Azure Functions
-- Python
-- LangGraph
-- PostgreSQL metastore access through the existing DB connector abstraction
-
-Why LangGraph:
-
-- the requirement called for an agentic execution shell
-- LangGraph gives explicit state transitions
-- it keeps the workflow easy to read and extend
-- the decision logic can remain deterministic instead of LLM-driven
-
-Important note:
-
-- LangGraph is used here as an orchestration shell, not as an open-ended reasoning engine
-- the surrogate-key decision itself is rules-first and deterministic
+If this step ran after naming or STTM generation, those downstream artifacts would be built on stale physical structure.
 
 ---
 
-## 6. Data Sources Used By This Step
-The surrogate-key step depends on outputs from upstream Foundation Layer agents.
+## 3. Architecture Topology
+
+```text
+User
+  |
+  v
+apps-azure (React UI)
+  |
+  |  POST /api/v1/agents/surrogate-key/execute   [phase=assess | plan]
+  |  POST /api/v1/agents/surrogate-key/confirm
+  v
+apis-azure (FastAPI orchestration layer)
+  |
+  |  build_agent_input(...)
+  |  write_agent_input_to_db(...)
+  |  trigger Azure Function
+  v
+adm-foundation-layer-agents-azure (Azure Function + Python Agent)
+  |
+  |  fetch_input() from dfl_agent_input
+  |  run LangGraph nodes
+  |  push_data() to dfl_adm_session
+  v
+Metastore (Postgres)
+  |
+  v
+apis-azure restructure_output_by_agent(...)
+  |
+  v
+apps-azure UI review and confirm
+```
+
+---
+
+## 4. Repo Responsibilities
+
+## 4.1 `apps-azure`
+
+### Key Files
+
+- `apps-azure/frontend/components/stages/Foundation_Layer/Stage4_PhysicalModeling.tsx`
+- `apps-azure/frontend/components/stages/Foundation_Layer/stage4/GenerateSurrogateKeysView.tsx`
+
+### Responsibilities
+
+- open the Stage 4 surrogate-key modal
+- trigger the assessment phase
+- trigger the plan phase
+- render assessment summary groups
+- render the table-level plan
+- enforce locked mandatory SCD Type 2 behavior
+- allow optional row selection
+- allow datatype changes
+- confirm reviewed selections
+- hold the confirmed surrogate-enhanced logical entities in frontend state for downstream Stage 4 use
+
+---
+
+## 4.2 `apis-azure`
+
+### Key Files
+
+- `apis-azure/backend/api/routes/agents.py`
+- `apis-azure/backend/api/routes/surrogate_key_helpers.py`
+- `apis-azure/backend/api/routes/dependency_agents.py`
+
+### Responsibilities
+
+- resolve dependent sessions from metastore
+- build normalized surrogate-agent input
+- write `input_json` to `dfl_agent_input`
+- call the Azure Function endpoint
+- negotiate Web PubSub
+- confirm surrogate selections
+- persist the new active session version to `dfl_adm_session`
+- provide surrogate-enriched output to downstream agents
+
+---
+
+## 4.3 `adm-foundation-layer-agents-azure`
+
+### Key Files
+
+- `adm-foundation-layer-agents-azure/function_app.py`
+- `adm-foundation-layer-agents-azure/agents/SurrogateKeyGenerator/SurrogateKeyGeneratorAgent.py`
+- `adm-foundation-layer-agents-azure/agents/SurrogateKeyGenerator/master/agent.py`
+
+### Responsibilities
+
+- receive execution request from API layer
+- fetch stored input from metastore
+- run deterministic surrogate-key flow using LangGraph
+- persist output to metastore
+- publish status lifecycle events
+
+---
+
+## 5. Tech Stack And Why It Was Chosen
+
+| Layer | Technology | Why It Fits |
+|---|---|---|
+| UI | React + TypeScript + Vite | Fits the existing Foundation Layer app and supports responsive HITL state updates |
+| API | FastAPI + SQLAlchemy | Matches the rest of the ADM orchestration pattern and metastore access layer |
+| Execution | Azure Functions | Already used for agent runtime integration and async activity execution |
+| Agent Shell | LangGraph | Gives explicit graph state and clean deterministic node orchestration |
+| Persistence | PostgreSQL metastore | Existing ADM session and agent-input persistence model |
+| Realtime Feedback | Azure Web PubSub | Streams progress back to the UI without polling loops |
+
+### Why LangGraph Was Used Here
+
+LangGraph is not used here to generate free-form reasoning. It is used to provide an explicit execution graph:
+
+- `load_state`
+- `assess_surrogate_keys`
+- conditional route
+- `plan_surrogate_keys`
+
+This is valuable because:
+
+- the workflow is inspectable
+- the execution order is rigid
+- future nodes can be added safely
+- the business rules remain deterministic
+
+---
+
+## 6. Dependency Model
 
 Dependency registration lives in:
 
 - `apis-azure/backend/api/routes/dependency_agents.py`
 
-For `SurrogateKeyGeneratorAgent`, the dependency list is:
+For `SurrogateKeyGeneratorAgent`, dependencies are:
 
-- `MapAttributesToConceptsAgent`
-- `PrimaryKeyAgent-logical`
-- `EntityRoleRecommenderAgent`
-- `SCDTypeRecommenderAgent`
-- `RelationshipIdentifierLogicalAgent`
+```python
+"SurrogateKeyGeneratorAgent": [
+    "MapAttributesToConceptsAgent",
+    "PrimaryKeyAgent-logical",
+    "EntityRoleRecommenderAgent",
+    "SCDTypeRecommenderAgent",
+    "RelationshipIdentifierLogicalAgent"
+]
+```
 
-These provide:
+### What Each Dependency Contributes
 
-- logical entities and attributes
-- business keys
-- entity role classification
-- SCD type recommendations and confirmed SCD2 tracked attributes
-- logical parent-child relationships
+| Dependency | What It Provides | Why Surrogate Step Needs It |
+|---|---|---|
+| `MapAttributesToConceptsAgent` | logical entities and attributes | base logical model to enrich |
+| `PrimaryKeyAgent-logical` | business keys | preserve natural/business key identity |
+| `EntityRoleRecommenderAgent` | fact vs dimension context | entity role display and context |
+| `SCDTypeRecommenderAgent` | SCD type + confirmed tracked attrs | mandatory-vs-optional rule evaluation |
+| `RelationshipIdentifierLogicalAgent` | parent-child relationships | propagated surrogate foreign-key planning |
 
 ---
 
-## 7. End-To-End User Flow
+## 7. HITL Design
 
-### 7.1 User Opens Stage 4
-The user enters Foundation Layer Stage 4 in the frontend.
+## 7.1 Why This Is HITL
 
-File:
+This step is HITL because the user is not forced to accept the first generated structural plan. Instead the system:
 
-- `Stage4_PhysicalModeling.tsx`
+1. assesses
+2. explains
+3. generates a reviewable plan
+4. accepts user edits
+5. persists confirmed structural choices
 
-The first visible sub-step is `Generate Surrogate Keys`.
+That is not just “user sees result.” It is user-guided structural confirmation.
 
-### 7.2 User Clicks Assessment Action
-The frontend calls:
+## 7.2 How HITL Works Without Multiple Execute Endpoints
 
-- `POST /api/v1/agents/surrogate-key/execute`
+This design is elegant because the API does not need separate execution endpoints for:
 
-Form fields:
+- assessment
+- plan generation
 
-- `session_id`
-- `phase=assess`
+Instead, one execution endpoint is reused:
 
-The frontend resets surrogate-key local state, clears logs, and starts progress streaming.
+```http
+POST /api/v1/agents/surrogate-key/execute
+```
 
-### 7.3 Backend Prepares Agent Input
-In `agents.py`, the route:
+and behavior is controlled by a single key:
 
-- validates the phase
-- loads active dependency sessions from `dfl_adm_session`
-- uses `build_agent_input(agent_name="SurrogateKeyGeneratorAgent", ...)`
-- calls `consolidate_for_surrogate_key_generator(...)`
-- writes the resulting payload to `dfl_agent_input`
+```json
+{
+  "phase": "assess"
+}
+```
 
-Metastore write method:
+or
 
-- `write_agent_input_to_db(...)`
+```json
+{
+  "phase": "plan"
+}
+```
+
+This is one of the strongest parts of the design:
+
+- same route
+- same dependency preparation logic
+- same metastore input pattern
+- different graph behavior driven by state
+
+The confirm step is intentionally separate because confirmation is not execution. It is a **state-commit action**:
+
+```http
+POST /api/v1/agents/surrogate-key/confirm
+```
+
+That distinction is important.
+
+---
+
+## 8. End-To-End Flow
+
+## 8.1 Step A: User Clicks `Assess Surrogate Key Need`
+
+Frontend sends:
+
+```http
+POST /api/v1/agents/surrogate-key/execute
+Content-Type: multipart/form-data
+```
+
+Form payload:
+
+```text
+session_id=<current_session_id>
+phase=assess
+```
+
+### What Frontend Does Before Call
+
+- clears surrogate logs
+- clears existing assessment/plan state
+- resets confirmation state
+- opens progress experience
+
+---
+
+## 8.2 Step B: API Builds Input
+
+Route:
+
+- `surrogate_key_generator_agent_server(...)` in `agents.py`
+
+### What Happens
+
+1. validate phase
+2. load dependent agent outputs from metastore
+3. call `build_agent_input(agent_name="SurrogateKeyGeneratorAgent", ...)`
+4. write input to `dfl_agent_input`
+5. trigger Azure Function
+
+### Relevant Code Pattern
+
+```python
+surrogate_input = build_agent_input(
+    agent_name=target_agent_name,
+    agent_outputs=agent_outputs,
+)
+surrogate_input["phase"] = normalized_phase
+
+write_agent_input_to_db(
+    session_id=session_id,
+    run_id=agent_input_id,
+    agent_name=target_agent_name,
+    input_json=surrogate_input,
+)
+```
+
+---
+
+## 8.3 Step C: Metastore Input Persistence
 
 Target table:
 
 - `{ADM_SCHEMA}.dfl_agent_input`
 
-Inserted columns:
+Inserted fields:
 
 - `session_id`
 - `run_id`
 - `agent_name`
 - `input_json`
 
-### 7.4 Backend Triggers Azure Function
-The backend calls the Azure Function endpoint:
+### Example Stored Input JSON
 
-- `/agent/surrogate_key_generator`
+```json
+{
+  "logical_entities": {
+    "Coverage": [
+      {
+        "attribute_name": "Coverage_Code",
+        "attribute_data_type": "string",
+        "attribute_description": "Coverage type code"
+      }
+    ]
+  },
+  "primary_key_data": {
+    "Coverage": {
+      "primary_key": ["Coverage_Code", "Coverage_Group"],
+      "justification": "Business key identified from logical modeling"
+    }
+  },
+  "entity_roles": {
+    "Coverage": "DIMENSION"
+  },
+  "scd_recommendations": {
+    "Coverage": {
+      "scd_type": "Type 2",
+      "tracked_attributes": ["Coverage_Name"],
+      "reasoning": "SCD Type 2 confirmed from saved tracked attributes."
+    }
+  },
+  "relationship_identifier_data": [],
+  "phase": "assess"
+}
+```
 
-The backend sends parameters including:
+### Critical HITL Control Keys
 
-- `session_id`
-- `agent_input_id`
-- `phase`
-- vault settings
-- agent name
+| Key | Why It Matters |
+|---|---|
+| `phase` | decides whether graph ends at assessment or proceeds to full planning |
+| `scd_recommendations` | drives mandatory vs optional logic |
+| `tracked_attributes` | proves why an entity is Type 2 |
+| `primary_key_data` | defines business keys that must remain persisted |
 
-Then it negotiates a Web PubSub URL and returns that to the frontend.
+---
 
-### 7.5 Azure Function Executes Agent
-In `function_app.py`, the activity trigger:
+## 8.4 Step D: Azure Function Trigger
 
-- validates `instance_id`
-- initializes `SurrogateKeyGeneratorAgent`
-- publishes a running event to Web PubSub
-- invokes `agent.invoke()`
-- persists output using `UpdateJobLogTable.push_data(...)`
-- publishes a completion event
+The API calls the Azure Function endpoint:
 
-### 7.6 Agent Loads Input From Metastore
-In `SurrogateKeyGeneratorAgent.py`, `_load_state(...)`:
+```text
+/agent/surrogate_key_generator
+```
 
-- reads `input_json` from `dfl_agent_input`
-- normalizes `logical_entities`
-- normalizes `primary_key_data`
-- normalizes `entity_roles`
-- normalizes `relationship_identifier_data`
-- normalizes SCD recommendations
+Payload sent to Azure Function includes values such as:
 
-Important confirmed-SCD behavior:
+```json
+{
+  "session_id": "<session_id>",
+  "user_id": "1",
+  "agent": "SurrogateKeyGeneratorAgent",
+  "agent_input_id": "<uuid>",
+  "phase": "assess",
+  "vault_type": "AzureKeyVault",
+  "vault_url": "https://llm-accelerator-adm.vault.azure.net/"
+}
+```
 
-- if `scd_type2_tracked_attributes` exists from the confirmed SCD step, those entities are upgraded to effective `Type 2`
-- this prevents stale pre-confirm `scd_type_1` values from suppressing mandatory surrogate-key behavior
+The API then negotiates a Web PubSub URL and returns that to the frontend so progress logs can stream in real time.
 
-### 7.7 Assessment Phase Output
-The agent builds entity plans in memory and returns only assessment data when `phase=assess`.
+---
 
-The assessment contains:
+## 8.5 Step E: Azure Function Executes Agent
 
-- `scd2_entities`
-- `scd1_entities`
-- `non_scd_entities`
-- `allow_skip`
-- `allow_generate`
-- `entity_count`
-- `message_for_modeler`
+File:
 
-Rules:
+- `adm-foundation-layer-agents-azure/function_app.py`
 
-- if any entity is `Type 2`, `allow_skip = false`
-- otherwise, `allow_skip = true`
+Key behavior:
 
-### 7.8 User Clicks Generate Plan
-The frontend again calls:
+```python
+agent = SurrogateKeyGeneratorAgent(params)
+agent_result = asyncio.run(agent.invoke())
+UpdateJobLogTable(params).push_data(result)
+```
 
-- `POST /api/v1/agents/surrogate-key/execute`
+This layer also publishes Web PubSub lifecycle events such as:
 
-Form fields:
+- execution started
+- execution completed
 
-- `session_id`
-- `phase=plan`
+---
 
-The same orchestration path runs again, but the agent now returns a detailed draft plan.
+## 8.6 Step F: Agent Loads State
 
-### 7.9 Draft Plan Produced
-The plan contains:
+In `SurrogateKeyGeneratorAgent.py`, `_load_state(...)` does the following:
 
-- `default_surrogate_key_type`
-- `entity_plans`
-- `relationship_plans`
+- fetches `input_json`
+- normalizes entity names
+- normalizes PK payloads
+- normalizes roles
+- normalizes relationships
+- normalizes effective SCD state
 
-Each `entity_plan` includes:
+### Critical Confirmed-SCD Override
 
-- `entity_name`
-- `entity_type`
-- `scd_type`
-- `business_keys`
-- `surrogate_key_required`
-- `generate_surrogate_key`
-- `skip_allowed`
-- `surrogate_key_type`
-- `surrogate_key_name`
-- `reasoning`
+This is a major engineering safeguard.
 
-Key rule:
+Sometimes the confirmed SCD state is stored separately as:
 
-- SCD Type 2 entities are mandatory
-- non-SCD2 entities remain optional
+```json
+{
+  "scd_type2_tracked_attributes": {
+    "Coverage": ["Coverage_Name"],
+    "Policyholder": ["Address_State", "Credit_Score_Tier"]
+  }
+}
+```
 
-### 7.10 Frontend HITL Review
-The UI then lets the user:
+while the original `scd_recommendations` block may still say:
 
-- see mandatory SCD2 entities
-- see optional candidates
-- review business keys
-- keep or remove optional rows
-- select datatype per row
-- bulk `Select All`
-- bulk `Clear Optional`
+```json
+{
+  "Coverage": {
+    "scd_type": "scd_type_1"
+  }
+}
+```
 
-Current UI behavior aligned to the requirement:
+The surrogate-key normalization logic merges these and upgrades the effective SCD type to `Type 2`.
 
-- SCD Type 2 rows are selected and locked on by default
-- non-SCD2 rows are shown but not selected by default
-- the confirm button shows an in-button confirmation animation while the save request is running
-- surrogate-step logs auto-scroll
+Without this, the surrogate-key step would make the wrong mandatory/optional decision.
 
-### 7.11 User Confirms Selections
-The frontend calls:
+---
 
-- `POST /api/v1/agents/surrogate-key/confirm`
+## 8.7 Step G: Assessment Output
 
-JSON body:
+When `phase=assess`, the graph returns only assessment data.
 
-- `session_id`
-- `session_name`
-- `user_name`
-- `confirmed_entities`
+### Example Assessment JSON
 
-### 7.12 Backend Persists Confirmed Session
-In `agents.py`, `confirm_surrogate_keys(...)`:
+```json
+{
+  "assessment": {
+    "allow_skip": false,
+    "allow_generate": true,
+    "entity_count": 6,
+    "scd2_entities": ["Coverage", "Insurance Policy", "Policyholder"],
+    "scd1_entities": ["Claim", "Insurance Agency", "Insurance Agent"],
+    "non_scd_entities": [],
+    "message_for_modeler": "[Surrogatekeyagent] : I found 3 SCD Type 2 entities in this model: Coverage, Insurance Policy, Policyholder. Surrogate keys are mandatory for those entities, so skip is disabled. Please proceed to generate the detailed surrogate-key plan."
+  }
+}
+```
 
-- loads the current active `SurrogateKeyGeneratorAgent` session from `dfl_adm_session`
-- calls `merge_confirmed_surrogate_session(...)`
-- writes a new active version to `dfl_adm_session` with `append_session_to_db(...)`
-- restructures the result for UI consumption
+### Assessment Decision Rules
+
+```text
+If any entity is Type 2:
+  allow_skip = false
+Else:
+  allow_skip = true
+```
+
+---
+
+## 8.8 Step H: User Clicks `Generate Surrogate Key Plan`
+
+Frontend again uses the same execute endpoint:
+
+```http
+POST /api/v1/agents/surrogate-key/execute
+```
+
+but now sends:
+
+```text
+phase=plan
+```
+
+This is a clean HITL reuse pattern:
+
+- same API route
+- same orchestration
+- different result depth
+
+---
+
+## 8.9 Step I: Draft Plan Output
+
+When `phase=plan`, the graph executes the planning node and returns `surrogate_key_generation`.
+
+### Example Plan JSON
+
+```json
+{
+  "surrogate_key_generation": {
+    "default_surrogate_key_type": "INT",
+    "relationship_plans": [],
+    "entity_plans": [
+      {
+        "entity_name": "Coverage",
+        "entity_type": "Dimension",
+        "scd_type": "Type 2",
+        "business_keys": ["Coverage_Code", "Coverage_Group"],
+        "surrogate_key_required": true,
+        "generate_surrogate_key": true,
+        "skip_allowed": false,
+        "surrogate_key_type": "INT",
+        "surrogate_key_name": "Coverage_SK",
+        "reasoning": "SCD Type 2 entities require surrogate keys to preserve historical versions."
+      },
+      {
+        "entity_name": "Insurance Agency",
+        "entity_type": "Dimension",
+        "scd_type": "Type 1",
+        "business_keys": ["Agency_Name"],
+        "surrogate_key_required": false,
+        "generate_surrogate_key": false,
+        "skip_allowed": true,
+        "surrogate_key_type": "INT",
+        "surrogate_key_name": "Insurance_Agency_SK",
+        "reasoning": "Non-SCD2 entities may skip surrogate keys unless the modeler chooses otherwise."
+      }
+    ]
+  }
+}
+```
+
+### Why This Matters
+
+The plan is not yet the source of truth. It is a reviewable draft.
+
+That is the heart of the HITL design.
+
+---
+
+## 8.10 Step J: Frontend Review Experience
+
+The UI renders:
+
+- mandatory SCD2 summary chips
+- optional candidate chips
+- per-entity business keys
+- per-row surrogate-key selection
+- per-row datatype selector
+- in-button confirm animation
+- autoscrolling logs
+
+### Current UI Rules
+
+- SCD Type 2 rows are preselected and locked on
+- non-SCD2 rows are visible but unchecked by default
+- locked required rows cannot be disabled
+- `Select All` can opt in every row
+- `Clear Optional` removes only optional selections
+
+---
+
+## 8.11 Step K: User Clicks `Confirm Selections`
+
+Frontend sends:
+
+```http
+POST /api/v1/agents/surrogate-key/confirm
+Content-Type: application/json
+```
+
+### Example Confirm Request JSON
+
+```json
+{
+  "session_id": "abc-session-id",
+  "session_name": "Insurance Foundation Session",
+  "user_name": "data.modeler@company.com",
+  "confirmed_entities": [
+    {
+      "entity_name": "Coverage",
+      "entity_type": "Dimension",
+      "scd_type": "Type 2",
+      "business_keys": ["Coverage_Code", "Coverage_Group"],
+      "surrogate_key_required": true,
+      "generate_surrogate_key": true,
+      "skip_allowed": false,
+      "surrogate_key_type": "INT",
+      "surrogate_key_name": "Coverage_SK",
+      "reasoning": "SCD Type 2 entities require surrogate keys to preserve historical versions."
+    }
+  ]
+}
+```
+
+### UI Behavior During Confirm
+
+- the `Confirm Selections` button switches to in-button loading state
+- the spinner indicates state commit is happening
+- this is intentionally different from idle state to reassure the user that persistence is in progress
+
+---
+
+## 8.12 Step L: Backend Session Commit
+
+Route:
+
+- `confirm_surrogate_keys(...)` in `agents.py`
+
+### What Happens
+
+1. fetch current active surrogate-key session from `dfl_adm_session`
+2. load current session JSON
+3. merge confirmed selections
+4. write a new active session version
+5. restructure result back to UI shape
+
+### Core Code Pattern
+
+```python
+updated_session_json = merge_confirmed_surrogate_session(
+    current_session_json,
+    [selection.model_dump() for selection in payload.confirmed_entities],
+)
+
+append_session_to_db(
+    session_id=payload.session_id,
+    run_id=str(uuid.uuid4()),
+    agent_name="SurrogateKeyGeneratorAgent",
+    session_json=updated_session_json,
+    user_id="1",
+    username=payload.user_name,
+    session_name=payload.session_name,
+)
+```
+
+---
+
+## 8.13 Step M: Metastore Session Versioning
 
 Target table:
 
 - `{ADM_SCHEMA}.dfl_adm_session`
 
-Persistence pattern:
+### Versioning Pattern
 
-- the existing active row for the same `session_id + agent_name` is deactivated
-- a new row is inserted with `is_active=true`
-- this preserves session history while keeping a single current version
+Before insert:
 
-### 7.13 Merge Logic Applied During Confirmation
-`merge_confirmed_surrogate_session(...)` and `apply_confirmed_surrogate_plan(...)` perform the core merge.
+- old active row for the same `session_id + agent_name` is marked inactive
 
-They:
+Then:
 
-- remove prior surrogate artifacts before reapplying
-- keep business keys persisted
-- insert surrogate-key columns into selected entities
-- set the surrogate key as the physical primary key for selected entities
-- preserve business keys as `business_key`
-- propagate parent surrogate foreign keys into child entities when relationships exist
+- a new row is inserted as active
 
-The persisted confirmed output includes:
+This gives:
 
-- `confirmed_surrogate_keys`
-- `logical_entities_with_surrogate_keys`
-- `primary_key_data_with_surrogate_keys`
-- `propagated_foreign_keys`
+- historical lineage
+- reproducibility
+- clear current session state
 
----
+### Example Confirmed Session Output JSON
 
-## 8. Detailed Flow By Layer
-
-### 8.1 Frontend Layer
-Files:
-
-- `Stage4_PhysicalModeling.tsx`
-- `GenerateSurrogateKeysView.tsx`
-
-Key responsibilities:
-
-- local modal state
-- progress logs
-- WebSocket lifecycle
-- plan editing
-- confirm/skip actions
-- downstream state handoff through `surrogateEnhancedLogicalEntities`
-
-Notable UX choices:
-
-- assessment-first workflow
-- explicit review before generating the plan
-- visible locked mandatory rows
-- per-row datatype control
-- in-button confirmation loading state
-
-### 8.2 API Layer
-Files:
-
-- `agents.py`
-- `surrogate_key_helpers.py`
-
-Key responsibilities:
-
-- dependency resolution
-- payload normalization
-- metastore input writes
-- agent execution trigger
-- session versioning
-- downstream compatibility shaping
-
-Why helper extraction was used:
-
-- route handlers stay focused on orchestration
-- surrogate business rules stay reusable and testable
-- downstream agents can reuse the same normalized confirmed output
-
-### 8.3 Azure Function Layer
-Files:
-
-- `function_app.py`
-- `SurrogateKeyGenerator/master/agent.py`
-
-Key responsibilities:
-
-- invoke the Python agent
-- load `input_json` from `dfl_agent_input`
-- push `output_json` to the metastore
-- publish running/completed events
-
-### 8.4 Agent Layer
-File:
-
-- `SurrogateKeyGeneratorAgent.py`
-
-State carried through LangGraph:
-
-- `logical_entities`
-- `primary_key_data`
-- `entity_roles`
-- `scd_recommendations`
-- `relationship_identifier_data`
-- `phase`
-- `assessment`
-- `surrogate_key_generation`
-
-Graph shape:
-
-1. `load_state`
-2. `assess_surrogate_keys`
-3. conditional route
-4. `plan_surrogate_keys` if `phase=plan`
-5. end
-
-Why this is deterministic:
-
-- SCD type drives mandatory vs optional behavior
-- default datatype is fixed
-- naming rule is fixed
-- the same input session produces the same plan
+```json
+{
+  "result": {
+    "logical_entities": {
+      "Coverage": [
+        {
+          "attribute_name": "Coverage_SK",
+          "attribute_description": "surrogate key auto increment",
+          "attribute_data_type": "INT",
+          "attribute_domain": "Identifier",
+          "is_surrogate_key": true,
+          "surrogate_key_type": "INT"
+        },
+        {
+          "attribute_name": "Coverage_Code",
+          "attribute_data_type": "string"
+        },
+        {
+          "attribute_name": "Coverage_Group",
+          "attribute_data_type": "string"
+        }
+      ]
+    },
+    "primary_key_data": {
+      "Coverage": {
+        "primary_key": ["Coverage_SK"],
+        "business_key": ["Coverage_Code", "Coverage_Group"],
+        "justification": "Confirmed surrogate key replaces the physical primary key while business keys remain persisted."
+      }
+    },
+    "surrogate_key_generation": {
+      "confirmed_surrogate_keys": [
+        {
+          "entity_name": "Coverage",
+          "generate_surrogate_key": true,
+          "surrogate_key_name": "Coverage_SK",
+          "surrogate_key_type": "INT"
+        }
+      ],
+      "logical_entities_with_surrogate_keys": {
+        "Coverage": [
+          {
+            "attribute_name": "Coverage_SK",
+            "is_surrogate_key": true
+          }
+        ]
+      },
+      "primary_key_data_with_surrogate_keys": {
+        "Coverage": {
+          "primary_key": ["Coverage_SK"],
+          "business_key": ["Coverage_Code", "Coverage_Group"]
+        }
+      },
+      "propagated_foreign_keys": []
+    }
+  }
+}
+```
 
 ---
 
-## 9. Confirmed SCD2 Override Behavior
-This is a critical detail.
+## 9. Merge Semantics At Confirmation
 
-The SCD confirmation step may save user-confirmed Type 2 tracked attributes under:
+Confirmation logic lives mainly in:
 
-- `scd_type2_tracked_attributes`
+- `merge_confirmed_surrogate_session(...)`
+- `apply_confirmed_surrogate_plan(...)`
 
-while the older `scd_recommendations` block may still contain `scd_type_1`.
+### What The Merge Does
 
-To avoid incorrect surrogate-key assessment:
+- strips old surrogate artifacts before rebuilding
+- preserves base logical entities
+- preserves base business keys
+- inserts surrogate-key attributes into selected entities
+- replaces physical PK with surrogate PK where selected
+- preserves business keys separately
+- propagates surrogate foreign keys to children when relationships exist
 
-- the surrogate-key normalization path merges confirmed tracked attributes into the effective SCD view
-- any entity with confirmed tracked attributes is treated as `Type 2`
+### Why This Is Better Than Mutating Rows Blindly
 
-This merge now happens in:
+Because it:
 
-- `surrogate_key_helpers.py`
-- `SurrogateKeyGeneratorAgent.py`
-
-Without this merge, surrogate-key assessment can incorrectly report that no SCD2 entities exist.
+- avoids duplicate surrogate columns
+- keeps a base logical model reference
+- allows reruns without compounding artifacts
+- keeps confirmed state reproducible
 
 ---
 
 ## 10. Downstream Propagation
 
-### 10.1 Standard Naming
-The Standard Naming input builder checks for confirmed surrogate-enriched logical entities from the surrogate-key session first.
+## 10.1 Standard Naming
 
-Result:
+The Standard Naming consolidation checks surrogate-confirmed logical entities first.
 
-- naming runs against the surrogate-aware logical model, not the old one
+Why:
 
-### 10.2 STTM
-The STTM input builder also consumes surrogate-aware primary-key data and confirmed logical entities.
+- naming must run on the surrogate-aware model
 
-Result:
+### Effective Effect
 
-- target fields include surrogate-key columns
-- physical PK behavior reflects confirmed surrogate decisions
+- surrogate key attributes appear in the naming input
+- the downstream standardized model includes those physical attributes
 
-### 10.3 DDL/DML
-The DDL input builder reads surrogate-aware PK metadata from the surrogate session if available.
+## 10.2 STTM
 
-Result:
+The STTM consolidation uses:
 
-- DDL generation reflects surrogate-aware physical primary keys
+- surrogate-aware primary-key metadata
+- surrogate-aware logical entities
+
+Why:
+
+- STTM target fields must include the surrogate keys
+- STTM physical PK treatment must follow the confirmed plan
+
+## 10.3 DDL/DML
+
+The DDL builder uses surrogate-aware primary-key data when the surrogate session exists.
+
+Why:
+
+- final DDL should reflect the reviewed physical primary-key design, not just the original business-key model
 
 ---
 
 ## 11. Data Modeling Interpretation
+
 One dimension gets one surrogate key column, not one surrogate key per tracked attribute.
 
 Example:
 
-- `Coverage` may have multiple business-key columns
-- `Coverage` may also have one or more Type 2 tracked attributes
-- the physical dimension still gets a single surrogate key such as `Coverage_SK`
-- when any tracked Type 2 attribute changes, a new row version is created with a new surrogate-key value
+- `Coverage` can have business key columns:
+  - `Coverage_Code`
+  - `Coverage_Group`
+- `Coverage` can have one or more SCD Type 2 tracked attributes:
+  - `Coverage_Name`
+- the physical table still gets one surrogate PK:
+  - `Coverage_SK`
 
-That matches standard dimensional modeling behavior.
+When any tracked Type 2 attribute changes:
 
----
+- a new dimension row version is created
+- that new row receives a new surrogate-key value
 
-## 12. Logging And Observability
-
-### Frontend
-- assessment logs
-- plan-generation logs
-- confirmation completion/error logs
-- auto-scroll behavior in the surrogate-step console
-
-### API
-- input-preparation logs
-- execution error logs
-- session persistence logs
-
-### Azure Function
-- activity start logs
-- success/failure logs
-- PubSub lifecycle events
-
-### Agent
-- input-load logs
-- assessment logs
-- plan-generation logs
-- workflow completion logs
+That is correct dimensional modeling behavior.
 
 ---
 
-## 13. Why This Design Was Chosen
-This design was selected because it balances:
+## 12. Logging, Streaming, And UX Observability
 
-- deterministic physical-modeling rules
-- agentic orchestration requirements
-- existing session persistence conventions
-- user confirmation needs
-- downstream compatibility
+## 12.1 Frontend
 
-It avoids a brittle design where:
+- progress logs render inside the surrogate-step modal
+- logs auto-scroll
+- most recent item pulses during active progress
+- confirm button animates while commit is running
 
-- surrogate keys are generated too late
-- confirmed SCD choices are ignored
-- Standard Naming or STTM work from stale models
-- physical PK behavior diverges from the reviewed plan
+## 12.2 API
+
+- logs input preparation
+- logs execution failures
+- logs session commit failures
+
+## 12.3 Azure Function
+
+- publishes execution lifecycle events to Web PubSub
+- logs activity trigger start and completion
+
+## 12.4 Agent
+
+- logs normalized input load
+- logs assessment phase
+- logs plan generation phase
+- logs workflow completion
+
+---
+
+## 13. Why This Agent Is Architecturally Better Than Typical Generate-Only Agents
+
+This agent is stronger than a typical generate-only agent in the following ways:
+
+### 13.1 It Is Review-Driven
+Most agents return a generated result immediately. This one returns:
+
+- assessment
+- then plan
+- then confirmation commit
+
+That is a more mature workflow for structural modeling decisions.
+
+### 13.2 It Is Structurally Deterministic
+Many agents depend more heavily on inference or LLM output. This agent’s core decision logic is rules-based:
+
+- SCD2 -> mandatory
+- non-SCD2 -> optional
+- default datatype -> `INT`
+
+### 13.3 It Handles Confirmed State Correctly
+It merges:
+
+- original SCD recommendation output
+- confirmed SCD Type 2 tracked attributes
+
+This is a critical robustness improvement.
+
+### 13.4 It Persists Authoritative Downstream State
+It does not stop at UI review. It writes the confirmed result back so later agents consume the corrected structural model.
+
+That makes it not just a recommendation step, but a structural-state transition step.
 
 ---
 
 ## 14. Key Files
 
 ### Frontend
+
 - `apps-azure/frontend/components/stages/Foundation_Layer/Stage4_PhysicalModeling.tsx`
 - `apps-azure/frontend/components/stages/Foundation_Layer/stage4/GenerateSurrogateKeysView.tsx`
 
 ### API
+
 - `apis-azure/backend/api/routes/agents.py`
 - `apis-azure/backend/api/routes/surrogate_key_helpers.py`
 - `apis-azure/backend/api/routes/dependency_agents.py`
 
-### Agent/Azure Functions
+### Agent / Azure Functions
+
 - `adm-foundation-layer-agents-azure/function_app.py`
 - `adm-foundation-layer-agents-azure/agents/SurrogateKeyGenerator/SurrogateKeyGeneratorAgent.py`
 - `adm-foundation-layer-agents-azure/agents/SurrogateKeyGenerator/master/agent.py`
 
 ---
 
-## 15. Current Functional Summary
-As implemented today, the surrogate-key step does the following:
+## 15. Reference JSON Contracts
 
-- assesses whether the current model has SCD Type 2 entities
-- respects confirmed SCD Type 2 tracked attributes
-- makes SCD2 surrogate keys mandatory
-- lets users opt into surrogate keys for non-SCD2 entities
-- defaults selection to all SCD2 entities only
-- keeps business keys alongside surrogate keys
-- persists the confirmed surrogate-aware logical model
-- pushes that confirmed model into Standard Naming, STTM, and DDL/DML
+## 15.1 Assess Execute Request
 
-That is the current source of truth for how this step works inside `ADM_SILVER_LAYER`.
+```json
+{
+  "session_id": "<session_id>",
+  "phase": "assess"
+}
+```
+
+## 15.2 Plan Execute Request
+
+```json
+{
+  "session_id": "<session_id>",
+  "phase": "plan"
+}
+```
+
+## 15.3 Assessment Output
+
+```json
+{
+  "assessment": {
+    "allow_skip": false,
+    "allow_generate": true,
+    "entity_count": 6,
+    "scd2_entities": ["Coverage", "Insurance Policy", "Policyholder"],
+    "scd1_entities": ["Claim", "Insurance Agency", "Insurance Agent"],
+    "non_scd_entities": []
+  }
+}
+```
+
+## 15.4 Draft Plan Output
+
+```json
+{
+  "surrogate_key_generation": {
+    "default_surrogate_key_type": "INT",
+    "entity_plans": [
+      {
+        "entity_name": "Coverage",
+        "surrogate_key_required": true,
+        "generate_surrogate_key": true,
+        "surrogate_key_type": "INT",
+        "surrogate_key_name": "Coverage_SK"
+      }
+    ]
+  }
+}
+```
+
+## 15.5 Confirm Request
+
+```json
+{
+  "session_id": "<session_id>",
+  "session_name": "<session_name>",
+  "user_name": "<user_name>",
+  "confirmed_entities": [
+    {
+      "entity_name": "Coverage",
+      "generate_surrogate_key": true,
+      "surrogate_key_type": "INT",
+      "surrogate_key_name": "Coverage_SK"
+    }
+  ]
+}
+```
+
+## 15.6 Confirmed Output
+
+```json
+{
+  "surrogate_key_generation": {
+    "confirmed_surrogate_keys": [
+      {
+        "entity_name": "Coverage",
+        "generate_surrogate_key": true
+      }
+    ],
+    "logical_entities_with_surrogate_keys": {
+      "Coverage": [
+        {
+          "attribute_name": "Coverage_SK",
+          "is_surrogate_key": true
+        }
+      ]
+    }
+  }
+}
+```
+
+---
+
+## 16. Current Functional Summary
+
+As implemented today, this step:
+
+- evaluates effective SCD state using confirmed tracked attributes where present
+- forces surrogate keys for SCD Type 2 entities
+- keeps surrogate keys optional for non-SCD2 entities
+- defaults selected rows to all SCD2 entities only
+- preserves business keys in the entity model
+- allows datatype review before commit
+- uses a clean assessment-first HITL pattern
+- persists confirmed surrogate-aware logical structure as the new active session state
+- propagates that state to Standard Naming, STTM, and DDL/DML
+
+This document is the current deep technical source of truth for the Foundation Layer surrogate-key feature in `ADM_SILVER_LAYER`.
