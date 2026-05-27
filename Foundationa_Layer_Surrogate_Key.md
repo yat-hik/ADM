@@ -24,6 +24,18 @@ This implementation is not just another backend agent call. It is a structured H
 - persists the confirmed physical-design intent back into session state
 - turns the confirmed result into the downstream source of truth
 
+### Plain-Language Summary
+
+In simple terms, this is what we built:
+
+1. the user first asks the system to assess whether surrogate keys are needed
+2. the system checks business keys, SCD type, entity role, and logical relationships
+3. if SCD Type 2 exists, those entities are marked as mandatory for surrogate keys
+4. the user then reviews a generated plan instead of blindly accepting a result
+5. once the user confirms, that confirmed surrogate-key design becomes the new active physical-design input for later Stage 4 steps
+
+So this step is not only “showing a recommendation.” It is changing the authoritative design state used by the rest of the physical-modeling flow.
+
 ---
 
 ## 1. Design Goals
@@ -183,6 +195,14 @@ apps-azure UI review and confirm
 - persist output to metastore
 - publish status lifecycle events
 
+### One-Line Responsibility Split
+
+| Repo | Short Responsibility |
+|---|---|
+| `apps-azure` | user interaction, HITL review, selection, confirmation |
+| `apis-azure` | orchestration, metastore coordination, downstream session shaping |
+| `adm-foundation-layer-agents-azure` | actual agent execution and result persistence |
+
 ---
 
 ## 5. Tech Stack And Why It Was Chosen
@@ -302,6 +322,23 @@ POST /api/v1/agents/surrogate-key/confirm
 
 That distinction is important.
 
+### Why This Pattern Is Better Than Adding Many New Endpoints
+
+This implementation keeps the API easier to maintain because:
+
+- assessment and plan use the same execution route
+- only one control key, `phase`, changes the behavior
+- all dependency preparation logic stays in one place
+- the confirm route is reserved only for persisting reviewed design decisions
+
+This is cleaner than building separate routes like:
+
+- `/surrogate-key/assess`
+- `/surrogate-key/plan`
+- `/surrogate-key/replan`
+
+because those would duplicate orchestration behavior and make the session flow harder to reason about.
+
 ---
 
 ## 8. End-To-End Flow
@@ -328,6 +365,10 @@ phase=assess
 - clears existing assessment/plan state
 - resets confirmation state
 - opens progress experience
+
+### Why This Matters
+
+This reset behavior ensures the user always sees a clean, current surrogate-key review flow rather than stale plan state from a previous run.
 
 ---
 
@@ -420,6 +461,15 @@ Inserted fields:
 | `tracked_attributes` | proves why an entity is Type 2 |
 | `primary_key_data` | defines business keys that must remain persisted |
 
+### Additional Important Runtime Keys
+
+| Key | Layer | Usage |
+|---|---|---|
+| `session_id` | UI -> API -> metastore | ties all activity to the active Foundation session |
+| `agent_input_id` | API -> Azure Function -> metastore | identifies the exact input row in `dfl_agent_input` |
+| `run_id` / `instance_id` | Azure Function / PubSub | used for execution tracking and websocket group streaming |
+| `confirmed_entities` | UI -> confirm API | carries user-reviewed table-level selections |
+
 ---
 
 ## 8.4 Step D: Azure Function Trigger
@@ -466,6 +516,21 @@ This layer also publishes Web PubSub lifecycle events such as:
 
 - execution started
 - execution completed
+
+### Why This Agent Feels Different In The UI
+
+Most other agents in the workflow return a result and stop there. This agent behaves more like a review-oriented design service:
+
+- phase 1 gives assessment
+- phase 2 gives a draft plan
+- phase 3 commits the reviewed decision
+
+That is why the user experience includes:
+
+- progress logs
+- summary chips
+- locked mandatory selections
+- confirmation animation
 
 ---
 
@@ -539,6 +604,14 @@ If any entity is Type 2:
 Else:
   allow_skip = true
 ```
+
+### Requirement Mapping For Assessment
+
+| Requirement Area | How Assessment Supports It |
+|---|---|
+| generate or skip option | returns `allow_skip` and `allow_generate` |
+| SCD2 must not be skippable | sets `allow_skip=false` when any Type 2 exists |
+| user clarity | returns grouped `scd2_entities` and `scd1_entities` |
 
 ---
 
@@ -632,6 +705,15 @@ The UI renders:
 - locked required rows cannot be disabled
 - `Select All` can opt in every row
 - `Clear Optional` removes only optional selections
+
+### Confirm Button Behavior
+
+When the user clicks `Confirm Selections`:
+
+- the button itself becomes the progress indicator
+- a loading spinner is shown inside the button
+- the button is temporarily disabled
+- once the confirm API succeeds, the confirmed result is committed into session state and the workflow advances
 
 ---
 
@@ -822,9 +904,26 @@ Because it:
 - allows reruns without compounding artifacts
 - keeps confirmed state reproducible
 
+### Important Business Effect
+
+After confirmation:
+
+- business keys are still retained in the entity
+- the surrogate key becomes the physical primary key for selected entities
+- the confirmed structure is what downstream agents now consume
+
 ---
 
 ## 10. Downstream Propagation
+
+### Impact Matrix For Subsequent Agents
+
+| Subsequent Agent | Is It Impacted? | How |
+|---|---|---|
+| `StandardNamingGeneratorAgent` | Yes | receives surrogate-enriched logical entities |
+| `SttmGeneratorAgent` | Yes | receives surrogate-aware entity structure and primary-key metadata |
+| `STTMtoDDLAgent` | Yes | uses surrogate-aware primary-key metadata for physical PK generation |
+| `RelationshipIdentifierLogicalAgent` | No direct rerun impact | remains an upstream dependency used during surrogate planning |
 
 ## 10.1 Standard Naming
 
@@ -850,6 +949,23 @@ Why:
 
 - STTM target fields must include the surrogate keys
 - STTM physical PK treatment must follow the confirmed plan
+
+### Current Relationship Handling Limitation
+
+This is important for architects to know.
+
+Current implementation behavior is:
+
+- logical relationships are already available to the surrogate-key step as upstream input
+- the surrogate-key step can plan propagated foreign-key behavior
+- however, physical relationship/STTM realization still effectively happens when the user clicks `Generate STTM`
+
+So in current implementation:
+
+- the surrogate-key step prepares and persists surrogate-aware structural intent early
+- relationship materialization into the STTM output still happens in the STTM generation step
+
+This means the current implementation is structurally aligned, but the visible flow of LDM relationships into physical mapping still becomes fully evident only after STTM generation.
 
 ## 10.3 DDL/DML
 
@@ -945,6 +1061,12 @@ This is a critical robustness improvement.
 It does not stop at UI review. It writes the confirmed result back so later agents consume the corrected structural model.
 
 That makes it not just a recommendation step, but a structural-state transition step.
+
+### 13.5 It Reduces Hidden Coupling
+
+Because this agent persists its confirmed output into active session state, downstream agents do not need custom UI hacks to remember user choices. They simply read the current active session contract.
+
+That is a major architectural strength.
 
 ---
 
@@ -1081,3 +1203,30 @@ As implemented today, this step:
 - propagates that state to Standard Naming, STTM, and DDL/DML
 
 This document is the current deep technical source of truth for the Foundation Layer surrogate-key feature in `ADM_SILVER_LAYER`.
+
+---
+
+## 17. What We Changed In Practical Terms
+
+For someone reading this without prior context, the practical implementation changes are:
+
+- introduced a new first sub-step in Foundation Stage 4 called `Generate Surrogate Keys`
+- added an assessment-first HITL flow before plan generation
+- introduced deterministic surrogate-key planning logic through `SurrogateKeyGeneratorAgent`
+- added confirm-time merge logic so surrogate choices become the new active structural state
+- ensured confirmed SCD Type 2 tracked attributes override stale recommendation values
+- updated downstream Stage 4 input consolidation so later agents consume surrogate-aware session data
+- improved the UI review flow with locked mandatory rows, optional row selection, autoscrolling logs, and in-button confirmation progress
+
+---
+
+## 18. Recommended Reader Interpretation
+
+If you are:
+
+- a **data architect**: focus on Sections 2, 7, 9, 10, and 11
+- a **frontend engineer**: focus on Sections 4.1, 7, 8.1, 8.10, and 8.11
+- an **API engineer**: focus on Sections 4.2, 7.2, 8.2, 8.12, and 8.13
+- an **agent/backend engineer**: focus on Sections 4.3, 5, 8.5, 8.6, and 9
+
+That should help anyone understand both the business reason and the technical execution path of this feature quickly.
