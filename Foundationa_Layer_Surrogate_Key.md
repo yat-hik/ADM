@@ -567,3 +567,77 @@ To rebuild this feature from scratch:
 - Surrogate relationship plans preserve original relationship metadata and only replace PK/FK matching columns when the parent entity was selected for surrogate-key generation.
 - Confirmed surrogate relationship output remains a full relationship set, so non-selected relationships are not dropped when selected SK relationships exist.
 - Direction-corrected relationships use the selected parent entity's SK as both `parent_matching_column` and propagated child FK, while retaining original business-key column metadata.
+
+
+## 19. Diagram UI Behavior
+
+### 19.1 Overview
+
+The physical model diagram in Stage 4 provides interactive highlighting to help modelers understand relationship topology when reviewing surrogate-key plans. The diagram renders entities as draggable cards and relationships as connecting lines, with click-driven visual feedback.
+
+### 19.2 Components
+
+| File | Responsibility |
+|---|---|
+| `apps-azure/frontend/components/diagram/Foundation_Layer/PhysicalModelDiagram.tsx` | Stage 4-specific diagram wrapper that computes FK columns from `physicalRelationships` and marks attributes as `isForeignKey`. |
+| `apps-azure/frontend/components/diagram/Foundation_Layer/DiagramBase.tsx` | Reusable diagram engine that renders entities, handles drag/zoom, and manages highlight state. |
+| `apps-azure/frontend/components/DataModelDiagram.tsx` | Parent stage component that instantiates `PhysicalModelDiagram` with `onEntityClick` callback. |
+
+### 19.3 Entity Highlight States
+
+When a modeler clicks an entity table on the diagram, `DiagramBase` computes a `highlightState` for every entity:
+
+| State | Visual | Meaning |
+|---|---|---|
+| `selected` | Orange ring (`ring-2 ring-orange-400`), orange border, orange-tinted background | The clicked entity. |
+| `related` | Green ring (`ring-2 ring-emerald-300`), green border, green-tinted background | Entities directly connected by a relationship to the selected entity. |
+| `dimmed` | Reduced opacity (`opacity-35`) | All other entities not directly connected to the selection. |
+| `normal` | Default white background, gray border | Default state when no entity is selected. |
+
+### 19.4 Relationship Traversal Logic
+
+Highlight propagation uses direct relationship adjacency, not transitive traversal:
+
+1. User clicks entity `X`.
+2. `highlightedEntityName` is set to `X`.
+3. `relatedEntityNames` is computed by iterating `model.relationships`:
+   - If `rel.fromEntity === X`, add `rel.toEntity` to the related set.
+   - If `rel.toEntity === X`, add `rel.fromEntity` to the related set.
+4. Each entity is rendered with:
+   - `highlightState = 'selected'` if it matches `highlightedEntityName`.
+   - `highlightState = 'related'` if it is in `relatedEntityNames`.
+   - `highlightState = 'dimmed'` for all remaining entities.
+5. Clicking the same entity again or clicking empty canvas clears the selection.
+
+### 19.5 Foreign Key Column Styling
+
+`PhysicalModelDiagram` marks foreign-key attributes before rendering:
+
+1. `foreignKeyColumnsByEntity` is built from `physicalRelationships`:
+   - Key: normalized child entity name.
+   - Value: set of `childMatchingColumn` values (lowercased).
+2. Each entity's attributes are mapped; matching attributes receive `isForeignKey: true`.
+3. `DiagramBase` renders FK attributes with:
+   - Blue text color (`text-sky-700`).
+   - Blue FK icon (`ForeignKeyIcon` in `text-blue-600`).
+   - `(FK)` suffix in blue.
+   - Sorted after PK attributes but before non-key attributes.
+
+### 19.6 Interaction Contract
+
+| Action | Behavior |
+|---|---|
+| Click entity table | Toggles `highlightedEntityName`; related entities highlight, others dim. |
+| Click same entity again | Clears selection; all entities return to `normal`. |
+| Click empty canvas area | Clears selection. |
+| Double-click entity | Triggers `onEntityClick` callback (if `openEntityOnDoubleClick` is enabled). |
+| Drag entity | Updates layout position; highlight state persists during drag. |
+
+### 19.7 Surrogate-Key Diagram Integration
+
+After surrogate-key confirmation:
+
+- `physicalRelationships` passed to `PhysicalModelDiagram` contain surrogate-aware columns.
+- FK columns reference surrogate key names (e.g., `product_sk`) when the parent entity's surrogate key was confirmed.
+- FK columns retain business-key names when the parent was not selected for surrogate-key generation.
+- The diagram highlights and FK styling reflect the confirmed surrogate-key state automatically because they consume the same `physicalRelationships` array used by STTM and DDL generation.
