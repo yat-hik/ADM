@@ -1,4 +1,5 @@
 # Foundation Layer Surrogate Key Technical Architecture
+```release(v1.0.1): intelligent surrogate key generation, SCD2 enforcement, and STTM integration```
 
 ## 1. Purpose
 
